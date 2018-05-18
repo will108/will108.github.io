@@ -1,0 +1,495 @@
+---
+title: "Examining Spotify Top 200 Charts and the Impacts On Other Countries"
+output: html_document
+---
+##### William Gomolka
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 1 Introduction
+In this tutorial, we're going to explore the top songs on Spotify and explore different artists, songs trends, and the ways in which songs spread across the globe. First, we'll look at specific artists, and then at the trends of their songs to see how they move up and down on the list of top songs. Finally, we'll use machine learning and random forests to see if we can predict if a song from the United States Top 200 list will make it onto the Top 200 list of another country (in our case Columbia).
+
+#### Required Tools
+You will need to install R, R Studio, and the following libraries:
+
+1. rvest
+
+2. tidyverse
+
+3. magrittr
+
+4. grid
+
+5. gridExtra
+
+6.randomForest
+
+
+
+## Data Curation
+We'll scrape our data from Spotify's website with the list of the global top 200 songs. The data is contained in an HTML node "chart-table" and includes some image data which we don't need, so we'll remove the extra columns. Additionally, the Track name and Artist are contained in the same column, so we'll separate these. 
+The data is given by day, so we'll first create a list of all the days we want to go through. Then we'll iterate through this list, making a dataframe for each day and then binding them together. For each song, we'll get the song name, artist, current ranking, number of streams, and day.
+
+The data we are scraping from can be found here: https://spotifycharts.com/regional/global/daily/
+
+To learn a little more about what Spotify's charts are and what some of their metrics like virals are, you can look here: https://radar.promogogo.com/announcement/How-Spotifys-Viral-Charts-Work/4e802ce8
+
+
+Let's look at all of the data from December 1, 2017 until May 5th 2018. With 200 songs every day, this leads to a dataframe of 31,200 entities. 
+
+As of May 17th, Spotify seems to have a new error where certain days do not always have a table and instead show up with a message saying to look at another day instead where data once was. We need to make sure we ignore all days which have no table by making sure that the table node does in fact exist on the page's html content.
+
+```{r getdata, message=FALSE, warning=FALSE}
+library(rvest)
+library(tidyverse)
+library(magrittr)
+
+
+get_day <- function(day) {
+   # Regular season is denoted a seasontype of 2
+  url <- paste0("https://spotifycharts.com/regional/us/daily/",format(day,"%Y-%m-%d"))
+
+
+  dl_html <- url %>%
+    read_html()
+  
+  # Recently (as of May 17th for some reason) Spotify has some days with no table where a table used to be. We need to make sure that we don't call html_node on these days or we'll get an error. So let's only call it if it has the table on the html page.
+  if(str_detect(dl_html, ".chart-table")) {
+    dl_tab <- dl_html %>%
+    html_node(".chart-table") %>%
+    html_table()
+    
+    dl_tab <- separate(dl_tab, Track, c("Track", "Artist"), sep="\\n")
+    # Remove the "by" that is in the artist column
+    dl_tab[5] <- lapply(dl_tab[5], gsub, pattern="by ", replacement="", fixed=TRUE)
+    dl_tab <- dl_tab %>% 
+    select(".1", Track, Artist, Streams) %>%
+    mutate(date = day)
+    colnames(dl_tab) <- c("Rank", "Track", "Artist", "Streams", "Day")
+    
+  } else {
+    dl_tab <- data.frame()
+  }
+  
+  dl_tab
+}
+
+
+# Iterate through the dates and concatenate the dataframes of each daily table
+get_dataframe <- function(start, end) {
+  list <- list()
+  theDate <- start
+  i <- 1
+  # Make a list of dates of which to pull the top songs table from
+  while(theDate <= end) {
+    list[[i]] <- theDate
+    theDate <- theDate + 1
+    i <- i + 1
+  }
+  # Get a dataframe from the online table and concatenate it with the other's
+  newframe <- list %>% 
+    lapply(get_day) %>%
+    reduce(rbind)
+  newframe
+}
+
+start <- as.Date("01-12-17",format="%d-%m-%y")
+end <- as.Date("05-05-18",format="%d-%m-%y")
+
+songs <- get_dataframe(start, end)
+head(songs)
+```
+
+
+Now that we have some tidy data, we can see what we can learn from it. First, let's look at the top 10 artists on the list. We can measure top artists in two different ways:
+
+The first way is that we can look at the number of distinct songs that an artist has gotten on the Top 200 list. 
+
+The second way is that we can look at how many total days an artist has spent on the list. For example, if an artist has 1 song on the list for 5 days, that would be 5 total days an artist has spent on the list. If an artist has had 3 songs which have each spent 4 days on the list it would be 12 total days on the list, etc.
+
+By looking at these two metrics side by side we can notice a few things. While an artist like Logic makes it onto the list for the most total days on the list, he does not even make it on the list for the most number of top songs on the list. This means that he has had less songs on the top 200 list, but that the ones that he has had have lasted much longer than others.
+
+```{r topArtists, message=FALSE, warning=FALSE}
+library(grid)
+library(gridExtra)
+
+# Calculate the number of total songs an artist has across all days (The same song on two different days counts as two songs), and the number of distinct songs an Artist has on the top songs list over the time period.
+topArtists <- songs %>%
+  group_by(Artist) %>%
+  summarize(differentSongs=n_distinct(Track), number_total = n())
+
+b1 <- topArtists %>%
+  arrange(desc(differentSongs)) %>%
+  slice(1:10) %>%
+  ggplot(aes(x=Artist, y=differentSongs, fill=Artist)) +
+  geom_bar(stat="identity") +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5), legend.position="none") + 
+  labs(title = "Most Number Of Top Songs")
+
+b2 <- topArtists %>%
+  arrange(desc(number_total)) %>%
+  slice(1:10) %>%
+  ggplot(aes(x=Artist, y=number_total, fill=Artist)) +
+  geom_bar(stat="identity") +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5), legend.position="none") + 
+  labs(title = "Most Total Days on List")
+
+grid.arrange(b1, b2, ncol = 2)
+```
+
+Now let's examine if we can predict how high different Artists' songs make it up on the list.
+First, to see how popular an artist is, we'll use the score we calculated previously as the number of total entries they have across all days in the dataframe. We'll also look at every song and figure out what the highest ranking it achieved was (note that highest ranking is actually the lowest numbered ranking since the best ranking is #1).
+
+```{r artistsSongs, message=FALSE, warning=FALSE}
+# First, let's merge the topArtists dataframe with the songs dataframe so we can see the artist's popularity when we look at the song. 
+more_data <- merge(songs, topArtists, by="Artist") %>%
+  arrange(desc(number_total))
+
+# Then let's group by the song and look at the maximum ranking it gets to (since we don't want to look at it's ascent to the top and have that make it look like the artist has more songs at the bottom of the list)
+highest_ranking_data <- songs %>%
+  group_by(Track) %>%
+  summarize(highest_ranking = min(Rank)) %>%
+  arrange(highest_ranking)
+
+# From here, we can add this highest ranking data on to the dataframe to get the whole picture
+more_data <- merge(more_data, highest_ranking_data, by="Track") %>%
+  arrange(desc(number_total), Day)
+
+head(more_data)
+```
+
+Now we have a dataframe of every song as it appears with it's highest ranking and the artist's ranking. Let's look at one artist, Post Malone, who currently holds the highest rated song. We'll specifically look at the highest ranking of all of his songs that have broken the top 25 and see if they are outliers or if he does have a high population of songs that have made it onto this list.
+
+We'll graph all of his songs and the highest ranking they have achieved. As can be seen below, Post Malone has had 21 songs on the lists. Interestingly, their highest positions do follow a path that appears to be generally linear in that he has had songs that have maxed out at almost every value from 1-25.
+
+```{r plotartist, message=FALSE, warning=FALSE}
+
+more_data %>%
+  group_by(Track, Artist, differentSongs) %>%
+  summarize(highest_ranking=min(highest_ranking)) %>%
+  filter(highest_ranking <= 25) %>%
+  arrange(highest_ranking) %>%
+  filter(str_detect(Artist, 'Post Malone')) %>%
+  rowid_to_column() %>%
+  ggplot(aes(x=rowid, y=highest_ranking, color=Track)) +
+  geom_point() +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5), legend.position="none") + 
+  labs(title = "Post Malone Song Highest Ranking on Spotify")  +
+  xlab("Song Ranking") + ylab("Song")
+```
+
+Now let's look at 3 of the top songs to see their change on the list over time. Since the songs that are currently at the top are still there at the top and have not gone down yet, let's look a little further back in March of 2018. 
+We'll do this in order to see if we can visualize a trend on the time top songs tend to stay on the charts.
+
+As can be seen below, the song "IDGAF" follows an interesting path. Starting at a low position on the charts (high on the graph), and making its way consistently towards a top position (around 25), and then making its way back down the list. Other songs like "All The Stars (with SZA)" begin already at a high position on the list (low position on the graph), stay much longer in their high position, and then slowly start to move down the list. This can be thought of as an instant hit that has stayed on the charts consistently for a long time.
+
+```{r songsChange, message=FALSE, warning=FALSE}
+# First let's get the top songs at a given time
+time <- '2018-03-02'
+
+topSongs <- songs %>%
+  filter(Day >= time) %>%
+  arrange(Day, Rank) %>%
+  slice(1:10) %>%
+  select(Track)
+
+moresongs <- c(topSongs)
+
+songs %>%
+  filter(str_detect(Track, c("rockstar", "All The Stars", "IDGAF"))) %>%
+  ggplot(aes(x=Day, y=Rank, color=Track)) + 
+  geom_smooth() +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5)) + 
+  labs(title = "Song Rankings vs Time")
+
+
+
+```
+
+## Global Music
+
+Up until now, we've only been looking at the United States top ranking list. But what if we want to know how music in the United States affects the charts in another country. How about if we want to know how long it takes a hot song in the US to make it into the charts of another country? For the purposes of this tutorial, we'll look at the charts in Columbia. The reason we're looking at Columbia specifically is because, while in many countries the top music looks almost identical to that of the US, Columbia has much more Spanish music which takes up the majority of the top charts. 
+
+Let's first get a dataframe of the music in Columbia. For the sake of not taking up as much space with duplicate code, the code has been ommitted but is almost identical to how the data was scraped for the United States charts. 
+```{r getColumbia, echo=FALSE, message=FALSE, warning=FALSE}
+get_date <- function(day) {
+   # Regular season is denoted a seasontype of 2
+  url <- paste0("https://spotifycharts.com/regional/co/daily/",format(day,"%Y-%m-%d"))
+
+
+  # Let's download the page's html first to avoid leaving the network connection open too long. This will continuously rewrite each page to the same html document so that it does not take up an individual file for each day.
+  #download.file(url, destfile = "scrapedpage.html", quiet=TRUE)
+  dl_html <- url %>%
+    read_html()
+  #dl_html <- read_html("scrapedpage.html")
+  
+  # Recently (as of May 17th for some reason) Spotify has some days with no table where a table used to be. We need to make sure that we don't call html_node on these days or we'll get an error. So let's only call it if it has the table on the html page.
+  if(str_detect(dl_html, ".chart-table")) {
+    dl_tab <- dl_html %>%
+    html_node(".chart-table") %>%
+    html_table()
+    
+    dl_tab <- separate(dl_tab, Track, c("Track", "Artist"), sep="\\n")
+    # Remove the "by" that is in the artist column
+    dl_tab[5] <- lapply(dl_tab[5], gsub, pattern="by ", replacement="", fixed=TRUE)
+    dl_tab <- dl_tab %>% 
+    select(".1", Track, Artist, Streams) %>%
+    mutate(date = day)
+    colnames(dl_tab) <- c("Rank", "Track", "Artist", "Streams", "Day")
+    
+  } else {
+    dl_tab <- data.frame()
+  }
+  
+  dl_tab
+}
+
+
+# Iterate through the dates and concatenate the dataframes of each daily table
+get_columbia_dataframe <- function(start, end) {
+  list <- list()
+  theDate <- start
+  i <- 1
+  # Make a list of dates of which to pull the top songs table from
+  while(theDate <= end) {
+    list[[i]] <- theDate
+    theDate <- theDate + 1
+    i <- i + 1
+  }
+  # Get a dataframe from the online table and concatenate it with the other's
+  newframe <- list %>% 
+    lapply(get_date) %>%
+    reduce(rbind)
+  newframe
+}
+
+columbiasongs <- get_columbia_dataframe(start, end)
+```
+
+```{r columbia, message=FALSE, warning=FALSE}
+head(columbiasongs)
+```
+
+
+Our goal is to be able to predict whether a song on the United States top 200 list is a hit in Columbia. We'll do this by using a decision tree with two metrics: How long a song lasts on the top 200 list, and how high it gets on the list. Intuition suggests that if a song is high up on the list (low number), it is a huge hit and could make it into another country. But what if the song only lasts a brief time high up on the list and never makes it in another country? Or what if a song never makes it to number 1, but is consistently up there? Let's take a look.
+
+The first thing we'll do is find the time a track spent on the charts. Since we're looking at data from a defined start date, if a song is already on there, we'll consider that the first day. Note that this may impact our analysis as if it is on the end of its run on the charts and makes it onto another country we could be measuring the time it spent on the charts as less, but for this tutorial we'll leave it as is for now. 
+
+```{r firstDate, message=FALSE, warning=FALSE}
+us <- songs %>%
+  group_by(Track, Artist) %>%
+  summarize(highest_ranking = min(Rank), timeUp = (max(Day)-min(Day) + 1),first_date = min(Day), last_date = max(Day)) %>%
+  arrange(desc(timeUp), highest_ranking)
+
+columbia <- columbiasongs %>%
+  group_by(Track, Artist) %>%
+  summarize(highest_ranking = min(Rank), timeUp = (max(Day)-min(Day) + 1),first_date = min(Day), last_date = max(Day)) %>%
+  arrange(desc(timeUp), highest_ranking)
+```
+
+Some of the data for the United States can be seen below. It is arranged by tracks that have spent the most time on the charts, and note that those which have 156 days have been on the top charts for every day we're looking through.
+```{r usdata, echo=FALSE, message=FALSE, warning=FALSE}
+head(us)
+```
+
+And some data from Columbia can be seen here:
+```{r columbiaview, echo=FALSE, message=FALSE, warning=FALSE}
+head(columbia)
+```
+
+Now that we have more information about how long songs stay on the charts in the U.S vs Columbia, let's visualize this. We'll use a boxplot of the time that songs stay on the charts for Columbia vs the US. As can be seen below, in the United States the central tendancy is that songs stay on the charts for less time than in Columbia. The spread for columbia is also greater, and the data in both countries is skewed towards spending less time on the charts, where more of the data is concentrated towards spending less time.
+
+To learn more about R's GGPlot and Boxplots in general (what the summary statistics represent), you can look here: https://www.r-bloggers.com/summarising-data-using-box-and-whisker-plots/
+
+```{r boxplot, message=FALSE, warning=FALSE}
+us_new <- us %>% mutate(country = "U.S")
+columbia_new <- columbia %>% mutate(country = "Columbia")
+
+rbind(us_new, columbia_new) %>%
+  ggplot(aes(x=factor(country), y=timeUp)) +
+  geom_boxplot() + 
+  labs(title = "Song Time Spent on Charts vs Country")  +
+  xlab("Country") + ylab("Time on the Top 200 List")
+```
+
+
+Now let's go through the data of the columbia table to find out which songs from the United States charts made it onto the charts in Columbia. Although we still counted the first day we measured songs as the first day they were on the charts, one thing we will do to prevent misinformation is filter it out if the first day we measured was also the first day it was on Columbia's charts. 
+
+The reason we do this is because we're assuming that we want to be able to predict how long it takes to get on the charts of Columbia, and if they both start on the same day here only because that was the first day we measured, then this information is misleading. Additionally, we'll make sure that the song appears on the United States charts first, rather than appearing first on the Columbian charts. This is because we want to be able to later predict if a song will be on the Columbian list based on the characteristics of the United States list.
+
+```{r mix, message=FALSE, warning=FALSE}
+mergedSongs <- merge(us, columbia, by="Track") %>%
+  select(-Artist.y) %>%
+  filter(first_date.x < first_date.y)
+colnames(mergedSongs) <- c("Track","Artist", "Highest_Ranking_US", "Time_Up_US", "First_Date_US", "Last_Date_US", "Highest_Ranking_Columbia", "Time_Up_Columbia", "First_Date_Columbia", "Last_Date_Columbia")
+
+head(mergedSongs)
+```
+
+Let's look at the same boxplot as before, but only on the songs which appear on both lists and which "started" (came on first) on the United States list. Now, it can be clearly seen that (as to be expected), the songs that make it onto the Columbian list from the United States list spend more time on the United States list. 
+
+Clearly, the central tendancy of the time spent on the United States list out of these songs is higher than before, and the data does not appear skewed like before.
+Additionally, notice that while the central tendancy for the United States list has increased by well over 50, the central tendancy in Columbia has not changed much (under 15).
+
+This seems to suggest that the songs that have made it onto the list in Columbia are songs that have spent much more time on the Top 200 list in the United States.  
+
+```{r all, message=FALSE, warning=FALSE}
+songsToUse <- mergedSongs$Track
+us_new <- us_new %>% filter(Track %in% songsToUse)
+columbia_new <- columbia_new %>% filter(Track %in% songsToUse)
+
+
+rbind(us_new, columbia_new) %>%
+  ggplot(aes(x=factor(country), y=timeUp)) +
+  geom_boxplot() + 
+  labs(title = "Song Time Spent on Charts vs Country")  +
+  xlab("Country") + ylab("Time on the Top 200 List")
+```
+
+
+
+Following this, let's graph the time spent on the charts in Columbia on the y-axis vs x-axis in the United States. As can be seen below generally (with exception of a few outliers), as the time spent on the list in the United States increases, so does the time spent on the list in Columbia.
+
+
+```{r reg, message=FALSE, warning=FALSE}
+mergedSongs %>%
+  filter(Time_Up_US < 150) %>%
+  ggplot(aes(x=Time_Up_US, y=Time_Up_Columbia)) +
+  geom_point()
+```
+
+## Machine Learning
+
+Now let's look at whether we can predict if a song will be on the charts in Columbia based on the time it's spent on the Charts in the United States and the highest ranking it attained.
+
+
+
+
+#### Setting Up Our Data
+
+The first thing we need to do is to make our data labeled based on whether a song made it onto the top charts in Columbia. We'll use our original table with every song on the United States list and give it an extra column as a label whether the song appears in the columbian top 200 list.
+
+Let's also normalize the data. We'll normalize the columns for highest ranking and time spent on the charts. This is done by finding the mean and standard deviation across all entries for each column and then setting the result to the (current number - mean)/standard deviation. 
+
+```{r convert, message=FALSE, warning=FALSE}
+# The us dataframe has every song, the highest it attained on the charts, and the time it spent there. The dataframe columbia is the same for the columbian top 200 list. 
+us <- us %>%
+  mutate(InColumbia = ifelse(Track %in% columbia$Track, "TRUE", "FALSE")) %>%
+  select(-first_date, -last_date) %>%
+  mutate(time = as.numeric(timeUp), Columbia=factor(InColumbia, levels=c("TRUE", "FALSE"))) %>%
+  select(-timeUp, -InColumbia) %>%
+  mutate(all = "Group") %>%
+  group_by(all) %>%
+  mutate(mean_ranking = mean(highest_ranking)) %>%
+  mutate(sd_ranking = sd(highest_ranking)) %>%
+  mutate(z_ranking = (highest_ranking - mean_ranking) / sd_ranking) %>%
+  mutate(mean_time = mean(time)) %>%
+  mutate(sd_time = sd(time)) %>%
+  mutate(z_time = (time - mean_time) / sd_time) %>%
+  ungroup() %>%
+  select(-all, -mean_ranking, -sd_ranking, -highest_ranking, -time, -mean_time, -sd_time)
+  
+head(us)
+
+```
+
+
+```{r testing, include=FALSE, message=FALSE, warning=FALSE}
+artists <- columbia %>%
+  group_by(Artist) %>%
+  summarize(number_songs = n()) %>%
+  arrange(desc(number_songs))
+
+us <- us %>%
+  filter(Artist %in% artists$Artist)
+
+us
+```
+
+
+Now that we have some labeled data, we need to do our train-test split. Let's use an 80-20 split so that we'll train on 80% of our data and test on 20% of it. Let's take 20% of the data now, and set it aside as out test dataframe. Then we'll take everything that's left and use it to train on.
+
+```{r traintest, message=FALSE, warning=FALSE}
+library(randomForest)
+
+
+test_random_forest_df <- us %>%
+  group_by(Columbia) %>%
+  sample_frac(.2) %>%
+  ungroup()
+
+train_random_forest_df <- us %>%
+  anti_join(test_random_forest_df, by="Track")
+```
+
+Our training data can be seen here:
+
+```{r train, message=FALSE, warning=FALSE}
+train_random_forest_df
+```
+
+And our testing data can be seen here:
+```{r test, message=FALSE, warning=FALSE}
+test_random_forest_df
+```
+
+
+
+### Training and Testing the Model
+
+Now let's train and test our model. We'll use a random forest here as our classifier. 
+To learn more about what a random forest algorithm is, you can read more here: https://towardsdatascience.com/the-random-forest-algorithm-d457d499ffcd
+
+Let's first train it only considering only the amount of time it spends on the list. When we train it only considering the time that it spends on the United States Top 200 list, we get an error rate of 35%.
+
+```{r modelrank, message=FALSE, warning=FALSE}
+rf <- randomForest(Columbia~., data=train_random_forest_df %>% select(-Artist, -Track, -z_ranking))
+
+test_predictions <- predict(rf, newdata=test_random_forest_df %>% select(-Artist, -Track, -z_ranking))
+
+table(pred=test_predictions, observed=test_random_forest_df$Columbia)
+```
+
+Now let's train our model considering only the highest ranking it attains. When we train on this, we get an error rate of 48.6%.
+
+```{r modeltime, message=FALSE, warning=FALSE}
+rf <- randomForest(Columbia~., data=train_random_forest_df %>% select(-Artist, -Track, -z_time))
+
+test_predictions <- predict(rf, newdata=test_random_forest_df %>% select(-Artist, -Track, -z_time))
+
+table(pred=test_predictions, observed=test_random_forest_df$Columbia)
+```
+
+
+Now let's use both of these characteristics to train a model. So the model is considering both the amount of time a song spent on the list as well as the highest ranking it attained. We can look at the results below, which leads to a much lower error rate of 26%.
+
+```{r model, message=FALSE, warning=FALSE}
+rf <- randomForest(Columbia~., data=train_random_forest_df %>% select(-Artist, -Track))
+
+test_predictions <- predict(rf, newdata=test_random_forest_df %>% select(-Artist, -Track))
+
+table(pred=test_predictions, observed=test_random_forest_df$Columbia)
+```
+
+
+## Conclusions
+From our random forest models, we can clearly see that when we train the model on only the time it spends on the United States Top 200 list, we get a high error rate of 35%. When we train the model on only the highest ranking that it attains, we get a high error rate of 48.6%. But when we use both characteristics, this error rate drops to only 26%. Thus it can be seen that these characteristics together have an impact on whether or not the song will make it onto the top charts in Columbia.
+
+While this analysis strictly dealt with predicting if a song would make it onto the Top 200 list in Columbia, the same logic can be applied to another country. Additionally, if there were a category to include genre in this anysis, I expect that the accuracy in our model would also increase for different countries. 
+
+
+#### Resources
+
+If you'd like to learn more about the tools used here or about how Spotify's chart system works, here are some helpful links.
+
+Spotify Charts: https://radar.promogogo.com/announcement/How-Spotifys-Viral-Charts-Work/4e802ce8
+
+Random Forest Algorithm: https://towardsdatascience.com/the-random-forest-algorithm-d457d499ffcd
+
+R GGPlot Cheatsheet: https://www.rstudio.com/wp-content/uploads/2015/03/ggplot2-cheatsheet.pdf
+
+R Random Forest: https://cran.r-project.org/web/packages/randomForest/randomForest.pdf
+
+R Box PLot: https://www.r-bloggers.com/summarising-data-using-box-and-whisker-plots/
